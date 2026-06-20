@@ -11608,6 +11608,93 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
 
         future.add_done_callback(_log_rename_failure)
 
+    def _discord_thread_auto_title_enabled(self, source: SessionSource) -> bool:
+        """Return True when Discord thread auto-title sync is enabled.
+
+        Enabled via either `discord.auto_thread_title: true` in config.yaml
+        or `DISCORD_AUTO_THREAD_TITLE=true` in the environment. Defaults off.
+        """
+        platform = getattr(source, "platform", "") or ""
+        platform_value = getattr(platform, "value", platform)
+        platform_name = str(platform_value).lower()
+        if platform_name != "discord":
+            return False
+        platform_cfg = None
+        if getattr(self, "config", None) and getattr(self.config, "platforms", None):
+            platform_cfg = self.config.platforms.get(platform)
+            if platform_cfg is None:
+                try:
+                    from gateway.config import Platform
+                    platform_cfg = self.config.platforms.get(Platform.DISCORD)
+                except Exception:
+                    platform_cfg = None
+            if platform_cfg is None:
+                platform_cfg = self.config.platforms.get(platform_name)
+        extra = (getattr(platform_cfg, "extra", None) or {}) if platform_cfg is not None else {}
+        value = extra.get("auto_thread_title")
+        if value is None:
+            value = os.getenv("DISCORD_AUTO_THREAD_TITLE", "false")
+        if isinstance(value, bool):
+            return value
+        return str(value).strip().lower() in {"1", "true", "yes", "on"}
+
+    async def _rename_discord_thread_for_session_title(
+        self,
+        source: SessionSource,
+        session_id: str,
+        title: str,
+    ) -> None:
+        """Best-effort rename of a Discord thread when Hermes auto-titles a session."""
+        if not title or not self._discord_thread_auto_title_enabled(source):
+            return
+        if not getattr(source, "thread_id", None):
+            return
+        adapter = self.adapters.get(source.platform) if getattr(self, "adapters", None) else None
+        if adapter is None:
+            return
+        rename = getattr(adapter, "rename_thread_for_session_title", None)
+        if rename is None:
+            return
+        await rename(str(source.thread_id), title)
+
+    def _schedule_discord_thread_title_rename(
+        self,
+        source: SessionSource,
+        session_id: str,
+        title: str,
+    ) -> None:
+        """Schedule a Discord thread rename from the auto-title background thread."""
+        if not title or not self._discord_thread_auto_title_enabled(source):
+            return
+        if not getattr(source, "thread_id", None):
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = getattr(self, "_gateway_loop", None)
+        if loop is None or loop.is_closed():
+            return
+        try:
+            copied_source = dataclasses.replace(source)
+        except Exception:
+            copied_source = source
+        future = safe_schedule_threadsafe(
+            self._rename_discord_thread_for_session_title(copied_source, session_id, title),
+            loop,
+            logger=logger,
+            log_message="Discord thread title rename failed to schedule",
+        )
+        if future is None:
+            return
+
+        def _log_rename_failure(fut) -> None:
+            try:
+                fut.result()
+            except Exception:
+                logger.debug("Discord thread title rename failed", exc_info=True)
+
+        future.add_done_callback(_log_rename_failure)
+
     _TELEGRAM_CAPABILITY_HINT_COOLDOWN_S = 300.0
 
     def _should_send_telegram_capability_hint(self, source: SessionSource) -> bool:
@@ -16200,6 +16287,12 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     }
                     if self._is_telegram_topic_lane(source):
                         maybe_auto_title_kwargs["title_callback"] = lambda title: self._schedule_telegram_topic_title_rename(
+                            source,
+                            effective_session_id,
+                            title,
+                        )
+                    elif self._discord_thread_auto_title_enabled(source) and getattr(source, "thread_id", None):
+                        maybe_auto_title_kwargs["title_callback"] = lambda title: self._schedule_discord_thread_title_rename(
                             source,
                             effective_session_id,
                             title,

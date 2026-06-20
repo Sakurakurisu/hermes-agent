@@ -845,6 +845,27 @@ def test_discord_auto_thread_config_bridge(monkeypatch, tmp_path):
     assert os.getenv("DISCORD_AUTO_THREAD") == "true"
 
 
+def test_discord_auto_thread_title_config_bridge(monkeypatch, tmp_path):
+    """discord.auto_thread_title should be bridged into Discord platform extras."""
+    import yaml
+    from pathlib import Path
+
+    hermes_dir = tmp_path / ".hermes"
+    hermes_dir.mkdir()
+    config_path = hermes_dir / "config.yaml"
+    config_path.write_text(yaml.dump({
+        "discord": {"auto_thread_title": True},
+    }))
+
+    monkeypatch.setenv("HERMES_HOME", str(hermes_dir))
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+
+    from gateway.config import Platform, load_gateway_config
+    cfg = load_gateway_config()
+
+    assert cfg.platforms[Platform.DISCORD].extra["auto_thread_title"] is True
+
+
 # ------------------------------------------------------------------
 # /skill command registration (flat + autocomplete)
 # ------------------------------------------------------------------

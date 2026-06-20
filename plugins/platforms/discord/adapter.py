@@ -4602,6 +4602,54 @@ class DiscordAdapter(BasePlatformAdapter):
                 )
                 return None
 
+    def _sanitize_thread_title(self, title: str) -> str:
+        """Return a Discord-safe thread title from a generated session title."""
+        cleaned = re.sub(r"\s+", " ", str(title or "")).strip()
+        if not cleaned:
+            return "Hermes Chat"
+        # Discord channel/thread names are 1-100 chars. Keep below the hard
+        # limit to avoid server-side truncation differences and leave room for
+        # multi-byte titles.
+        if len(cleaned) > 80:
+            cleaned = cleaned[:77].rstrip() + "..."
+        return cleaned
+
+    async def rename_thread_for_session_title(
+        self,
+        thread_id: str,
+        title: str,
+    ) -> bool:
+        """Best-effort rename of a Discord thread from Hermes' generated title."""
+        if not self._client or not DISCORD_AVAILABLE or not thread_id or not title:
+            return False
+        try:
+            thread = self._client.get_channel(int(thread_id))
+            if thread is None:
+                thread = await self._client.fetch_channel(int(thread_id))
+            if thread is None or not isinstance(thread, discord.Thread):
+                return False
+            new_name = self._sanitize_thread_title(title)
+            current_name = str(getattr(thread, "name", "") or "").strip()
+            if current_name == new_name:
+                return True
+            edit = getattr(thread, "edit", None)
+            if edit is None:
+                return False
+            await edit(name=new_name, reason="Hermes auto-generated session title")
+            logger.info("[%s] Renamed Discord thread %s to %r", self.name, thread_id, new_name)
+            return True
+        except Exception as exc:
+            # Missing Manage Threads, archived/locked threads, or Discord's low
+            # thread-rename rate limit should never break the user conversation.
+            logger.debug(
+                "[%s] Failed to rename Discord thread %s from session title: %s",
+                self.name,
+                thread_id,
+                exc,
+                exc_info=True,
+            )
+            return False
+
     async def create_handoff_thread(
         self,
         parent_chat_id: str,
