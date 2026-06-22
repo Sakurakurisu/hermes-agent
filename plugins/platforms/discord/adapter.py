@@ -5224,6 +5224,7 @@ class DiscordAdapter(BasePlatformAdapter):
         #   discord.allowed_channels: If set, bot ONLY responds in these channels (whitelist)
         #   discord.no_thread_channels: Channel IDs where bot responds directly without creating thread
         #   discord.auto_thread: Auto-create thread on @mention in channels (default: true)
+        #   discord.auto_thread_free_response_channels: Free-response channel IDs where auto-threading is still allowed
 
         thread_id = None
         parent_channel_id = None
@@ -5313,7 +5314,17 @@ class DiscordAdapter(BasePlatformAdapter):
         if not is_thread and not isinstance(message.channel, discord.DMChannel):
             no_thread_channels_raw = os.getenv("DISCORD_NO_THREAD_CHANNELS", "")
             no_thread_channels = {ch.strip() for ch in no_thread_channels_raw.split(",") if ch.strip()}
-            skip_thread = bool(channel_ids & no_thread_channels) or is_free_channel
+            free_auto_thread_raw = os.getenv("DISCORD_AUTO_THREAD_FREE_RESPONSE_CHANNELS", "")
+            free_auto_thread_channels = {
+                ch.strip() for ch in free_auto_thread_raw.split(",") if ch.strip()
+            }
+            free_response_auto_thread = (
+                "*" in free_auto_thread_channels
+                or bool(channel_ids & free_auto_thread_channels)
+            )
+            skip_thread = bool(channel_ids & no_thread_channels) or (
+                is_free_channel and not free_response_auto_thread
+            )
             auto_thread = os.getenv("DISCORD_AUTO_THREAD", "true").lower() in {"true", "1", "yes"}
             is_reply_message = getattr(message, "type", None) == discord.MessageType.reply
             if auto_thread and not skip_thread and not is_voice_linked_channel and not is_reply_message:
@@ -7078,6 +7089,11 @@ def _apply_yaml_config(yaml_cfg: dict, discord_cfg: dict) -> dict | None:
         os.environ["DISCORD_FREE_RESPONSE_CHANNELS"] = str(frc)
     if "auto_thread" in discord_cfg and not os.getenv("DISCORD_AUTO_THREAD"):
         os.environ["DISCORD_AUTO_THREAD"] = str(discord_cfg["auto_thread"]).lower()
+    atfrc = discord_cfg.get("auto_thread_free_response_channels")
+    if atfrc is not None and not os.getenv("DISCORD_AUTO_THREAD_FREE_RESPONSE_CHANNELS"):
+        if isinstance(atfrc, list):
+            atfrc = ",".join(str(v) for v in atfrc)
+        os.environ["DISCORD_AUTO_THREAD_FREE_RESPONSE_CHANNELS"] = str(atfrc)
     if "reactions" in discord_cfg and not os.getenv("DISCORD_REACTIONS"):
         os.environ["DISCORD_REACTIONS"] = str(discord_cfg["reactions"]).lower()
     # ignored_channels: channels where bot never responds (even when mentioned)

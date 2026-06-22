@@ -866,6 +866,29 @@ def test_discord_auto_thread_title_config_bridge(monkeypatch, tmp_path):
     assert cfg.platforms[Platform.DISCORD].extra["auto_thread_title"] is True
 
 
+def test_discord_auto_thread_free_response_channels_config_bridge(monkeypatch, tmp_path):
+    """discord.auto_thread_free_response_channels should become an env var."""
+    import os
+    import yaml
+    from pathlib import Path
+
+    hermes_dir = tmp_path / ".hermes"
+    hermes_dir.mkdir()
+    config_path = hermes_dir / "config.yaml"
+    config_path.write_text(yaml.dump({
+        "discord": {"auto_thread_free_response_channels": ["789", "999"]},
+    }))
+
+    monkeypatch.delenv("DISCORD_AUTO_THREAD_FREE_RESPONSE_CHANNELS", raising=False)
+    monkeypatch.setenv("HERMES_HOME", str(hermes_dir))
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+
+    from gateway.config import load_gateway_config
+    load_gateway_config()
+
+    assert os.getenv("DISCORD_AUTO_THREAD_FREE_RESPONSE_CHANNELS") == "789,999"
+
+
 # ------------------------------------------------------------------
 # /skill command registration (flat + autocomplete)
 # ------------------------------------------------------------------
