@@ -1078,6 +1078,97 @@ class TestLaunchdServiceRecovery:
         assert "nohup hermes gateway run" in out
 
 
+class TestManualGatewayRestart:
+    def test_gateway_run_command_prefers_console_script_wrapper(self, tmp_path, monkeypatch):
+        """Detached restarts should preserve wrapper sys.path customizations."""
+        bin_dir = tmp_path / "venv" / "bin"
+        bin_dir.mkdir(parents=True)
+        python = bin_dir / "python"
+        python.write_text("", encoding="utf-8")
+        hermes = bin_dir / "hermes"
+        hermes.write_text("#!/bin/sh\n", encoding="utf-8")
+
+        monkeypatch.setattr(gateway_cli, "get_python_path", lambda: str(python))
+        monkeypatch.setattr(gateway_cli, "_profile_arg", lambda *args, **kwargs: "")
+
+        assert gateway_cli._gateway_run_command() == [
+            str(hermes),
+            "gateway",
+            "run",
+            "--replace",
+        ]
+
+    def test_gateway_run_command_falls_back_to_python_module(self, tmp_path, monkeypatch):
+        bin_dir = tmp_path / "venv" / "bin"
+        bin_dir.mkdir(parents=True)
+        python = bin_dir / "python"
+        python.write_text("", encoding="utf-8")
+
+        monkeypatch.setattr(gateway_cli, "get_python_path", lambda: str(python))
+        monkeypatch.setattr(gateway_cli, "_profile_arg", lambda *args, **kwargs: "")
+
+        assert gateway_cli._gateway_run_command() == [
+            str(python),
+            "-m",
+            "hermes_cli.main",
+            "gateway",
+            "run",
+            "--replace",
+        ]
+
+    def _manual_restart_env(self, monkeypatch, *, spawned=True):
+        calls = []
+        monkeypatch.delenv("_HERMES_GATEWAY", raising=False)
+        monkeypatch.setattr(gateway_cli, "_dispatch_via_service_manager_if_s6", lambda action: False)
+        monkeypatch.setattr(gateway_cli, "_dispatch_all_via_service_manager_if_s6", lambda action: False)
+        monkeypatch.setattr(gateway_cli, "supports_systemd_services", lambda: False)
+        monkeypatch.setattr(gateway_cli, "is_macos", lambda: False)
+        monkeypatch.setattr(gateway_cli, "is_windows", lambda: False)
+        monkeypatch.setattr(gateway_cli, "stop_profile_gateway", lambda: calls.append("stop") or True)
+        monkeypatch.setattr(
+            gateway_cli,
+            "_wait_for_gateway_exit",
+            lambda timeout=10.0, force_after=None: calls.append(("wait", timeout, force_after)) or True,
+        )
+        monkeypatch.setattr(
+            gateway_cli,
+            "_spawn_detached_gateway",
+            lambda: calls.append("spawn") or spawned,
+        )
+        monkeypatch.setattr(
+            gateway_cli,
+            "run_gateway",
+            lambda verbose=0, **kwargs: calls.append(("run", verbose, kwargs)),
+        )
+        return calls
+
+    def test_manual_restart_spawns_detached_gateway_run(self, monkeypatch, capsys):
+        """No-service `gateway restart` must not keep running as `gateway restart`.
+
+        The dashboard/UI invokes this path in Docker-without-s6 layouts.  Running
+        the replacement inline leaves its process argv as `gateway restart`, so
+        gateway.pid/status reject it as not being a real `gateway run` process
+        even though Discord is online.
+        """
+        calls = self._manual_restart_env(monkeypatch)
+
+        gateway_cli._gateway_command_inner(
+            SimpleNamespace(gateway_command="restart", system=False, all=False)
+        )
+
+        assert calls == ["stop", ("wait", 10.0, 5.0), "spawn"]
+        assert "background process" in capsys.readouterr().out.lower()
+
+    def test_manual_restart_foreground_is_last_resort_only(self, monkeypatch):
+        calls = self._manual_restart_env(monkeypatch, spawned=False)
+
+        gateway_cli._gateway_command_inner(
+            SimpleNamespace(gateway_command="restart", system=False, all=False)
+        )
+
+        assert calls == ["stop", ("wait", 10.0, 5.0), "spawn", ("run", 0, {})]
+
+
 class TestLaunchdDomainDetection:
     """Regression tests for _launchd_domain() probing (#40831).
 

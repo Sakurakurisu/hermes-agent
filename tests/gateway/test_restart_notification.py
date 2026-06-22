@@ -120,6 +120,78 @@ async def test_restart_command_uses_detached_without_systemd(tmp_path, monkeypat
 
 
 @pytest.mark.asyncio
+async def test_restart_command_uses_detached_in_background_gateway_container(tmp_path, monkeypatch):
+    """A Docker marker alone is not a supervisor; background gateway containers need detached restart."""
+    import gateway.slash_commands as gateway_slash
+    import hermes_cli.service_manager as service_manager
+
+    monkeypatch.setattr(gateway_run, "_hermes_home", tmp_path)
+    monkeypatch.delenv("INVOCATION_ID", raising=False)
+    monkeypatch.delenv("HERMES_S6_SUPERVISED_CHILD", raising=False)
+    monkeypatch.setattr(service_manager, "detect_service_manager", lambda: "none")
+    monkeypatch.setattr(
+        gateway_slash.os.path,
+        "exists",
+        lambda p: p == "/.dockerenv",
+    )
+    monkeypatch.setattr(
+        gateway_slash.Path,
+        "read_bytes",
+        lambda self: b"/bin/zsh /entrypoint.sh",
+    )
+
+    runner, _adapter = make_restart_runner()
+    runner.request_restart = MagicMock(return_value=True)
+
+    source = make_restart_source(chat_id="42")
+    event = MessageEvent(
+        text="/restart",
+        message_type=MessageType.TEXT,
+        source=source,
+        message_id="m1",
+    )
+
+    await runner._handle_restart_command(event)
+    runner.request_restart.assert_called_once_with(detached=True, via_service=False)
+
+
+@pytest.mark.asyncio
+async def test_restart_command_uses_service_path_when_gateway_is_pid1_container(tmp_path, monkeypatch):
+    """If the gateway itself is PID 1, only the container runtime can bring it back."""
+    import gateway.slash_commands as gateway_slash
+    import hermes_cli.service_manager as service_manager
+
+    monkeypatch.setattr(gateway_run, "_hermes_home", tmp_path)
+    monkeypatch.delenv("INVOCATION_ID", raising=False)
+    monkeypatch.delenv("HERMES_S6_SUPERVISED_CHILD", raising=False)
+    monkeypatch.setattr(service_manager, "detect_service_manager", lambda: "none")
+    monkeypatch.setattr(
+        gateway_slash.os.path,
+        "exists",
+        lambda p: p == "/.dockerenv",
+    )
+    monkeypatch.setattr(
+        gateway_slash.Path,
+        "read_bytes",
+        lambda self: b"/opt/hermes/.venv/bin/hermes gateway run",
+    )
+
+    runner, _adapter = make_restart_runner()
+    runner.request_restart = MagicMock(return_value=True)
+
+    source = make_restart_source(chat_id="42")
+    event = MessageEvent(
+        text="/restart",
+        message_type=MessageType.TEXT,
+        source=source,
+        message_id="m1",
+    )
+
+    await runner._handle_restart_command(event)
+    runner.request_restart.assert_called_once_with(detached=False, via_service=True)
+
+
+@pytest.mark.asyncio
 async def test_restart_command_preserves_thread_id(tmp_path, monkeypatch):
     """Thread ID is saved when the requester is in a threaded chat."""
     monkeypatch.setattr(gateway_run, "_hermes_home", tmp_path)

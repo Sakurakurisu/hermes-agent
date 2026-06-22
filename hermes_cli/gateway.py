@@ -3317,12 +3317,26 @@ def _launchctl_domain_unsupported(returncode: int) -> bool:
 
 
 def _gateway_run_command() -> list[str]:
-    """Build the `python -m hermes_cli.main [--profile X] gateway run --replace` argv.
+    """Build the detached ``hermes gateway run --replace`` argv.
+
+    Prefer the installed ``hermes`` console-script next to the configured Python
+    interpreter.  Fork/editable installs may patch that wrapper to put the
+    checkout root at the front of ``sys.path``; bypassing it with
+    ``python -m hermes_cli.main`` can mix modules from the old install tree with
+    modules from the checkout (e.g. loading an old ``cron`` package that lacks
+    ``cron.scheduler_provider``).  Fall back to ``python -m`` only when the
+    wrapper is not available.
 
     Profile-aware: honors the active HERMES_HOME via `_profile_arg()` so the
     detached fallback launches into the same profile as the CLI invocation.
     """
-    cmd = [get_python_path(), "-m", "hermes_cli.main"]
+    python_path = Path(get_python_path())
+    script_name = "hermes.exe" if os.name == "nt" else "hermes"
+    hermes_script = python_path.parent / script_name
+    if hermes_script.exists():
+        cmd = [str(hermes_script)]
+    else:
+        cmd = [str(python_path), "-m", "hermes_cli.main"]
     profile_arg = _profile_arg()
     if profile_arg:
         cmd.extend(profile_arg.split())
@@ -6316,7 +6330,13 @@ def _gateway_command_inner(args):
                 # run_gateway() is tied to the very gateway process we just
                 # stopped and can die before the replacement is stable.
                 gateway_windows.start()
+            elif _spawn_detached_gateway():
+                print("✓ Started gateway as a background process")
             else:
+                # Last-resort compatibility fallback.  Normal manual restarts
+                # must use the detached launcher so the replacement process has
+                # a canonical `gateway run --replace` argv and writes a visible
+                # gateway.pid for `gateway status` / dashboard health checks.
                 run_gateway(verbose=0)
             return
 
@@ -6393,7 +6413,14 @@ def _gateway_command_inner(args):
 
             # Start fresh
             print("Starting gateway...")
-            run_gateway(verbose=0)
+            if _spawn_detached_gateway():
+                print("✓ Started gateway as a background process")
+            else:
+                # Last-resort compatibility fallback.  Normal manual restarts
+                # must use the detached launcher so the replacement process has
+                # a canonical `gateway run --replace` argv and writes a visible
+                # gateway.pid for `gateway status` / dashboard health checks.
+                run_gateway(verbose=0)
 
     elif subcmd == "status":
         deep = getattr(args, "deep", False)

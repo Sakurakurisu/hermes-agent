@@ -845,6 +845,48 @@ class GatewaySlashCommandsMixin:
             "  /platform resume <name> — re-queue a paused platform"
         )
 
+    @staticmethod
+    def _pid1_cmdline_contains_gateway_run() -> bool:
+        """Return True when the container's PID 1 is the gateway process.
+
+        In old/pre-supervisor container layouts the gateway itself is PID 1, so
+        a detached child cannot survive a `/restart` — the container exits and
+        only the container runtime/restart-policy can bring it back.  In newer
+        ad-hoc layouts PID 1 can be a long-lived entrypoint/dashboard process
+        that merely started the gateway in the background; there the detached
+        watcher *can* survive and is the correct restart mechanism.
+        """
+        try:
+            raw = Path("/proc/1/cmdline").read_bytes().replace(b"\x00", b" ")
+        except OSError:
+            return False
+        text = raw.decode("utf-8", errors="replace").lower()
+        return "gateway" in text and "run" in text and "hermes" in text
+
+    @staticmethod
+    def _restart_should_use_service_path() -> bool:
+        """True when `/restart` should exit for an external supervisor.
+
+        Systemd/s6-supervised gateways must not use a detached watcher because
+        the service manager owns the process lifecycle.  A plain container
+        marker by itself is *not* a supervisor signal; when PID 1 is an
+        entrypoint that stays alive after the gateway exits, detached restart is
+        safer and prevents the gateway from staying down.
+        """
+        if os.environ.get("INVOCATION_ID"):
+            return True
+        if os.environ.get("HERMES_S6_SUPERVISED_CHILD"):
+            return True
+        try:
+            from hermes_cli.service_manager import detect_service_manager
+
+            if detect_service_manager() == "s6":
+                return True
+        except Exception:
+            pass
+        in_container = os.path.exists("/.dockerenv") or os.path.exists("/run/.containerenv")
+        return bool(in_container and GatewaySlashCommandsMixin._pid1_cmdline_contains_gateway_run())
+
     async def _handle_restart_command(self, event: MessageEvent) -> Union[str, EphemeralReply]:
         """Handle /restart command - drain active work, then restart the gateway."""
         from gateway.run import _hermes_home
@@ -925,15 +967,16 @@ class GatewaySlashCommandsMixin:
             logger.debug("Failed to write restart dedup marker: %s", e)
 
         active_agents = self._running_agent_count()
-        # When running under a service manager (systemd/launchd) or inside a
-        # Docker/Podman container, use the service restart path: exit with
-        # code 75 so the service manager / container restart policy restarts
-        # us.  The detached subprocess approach (setsid + bash) doesn't work
-        # under systemd (KillMode=mixed kills the cgroup) or Docker (tini
-        # exits when the gateway dies, taking the detached helper with it).
-        _under_service = bool(os.environ.get("INVOCATION_ID"))  # systemd sets this
-        _in_container = os.path.exists("/.dockerenv") or os.path.exists("/run/.containerenv")
-        if _under_service or _in_container:
+        # Use the service-manager restart path only when something outside this
+        # gateway process is actually responsible for bringing it back.  A bare
+        # Docker/Podman marker is not enough: some container images start the
+        # gateway as a background child of a long-lived entrypoint/dashboard
+        # process (PID 1 is *not* the gateway and no s6/systemd unit exists).
+        # In that shape, exiting with the service-restart code just leaves the
+        # gateway down forever; the detached watcher is the correct manual-run
+        # restart path.  Treat true service contexts (systemd/s6) and legacy
+        # "gateway is PID 1" containers as service-managed.
+        if self._restart_should_use_service_path():
             self.request_restart(detached=False, via_service=True)
         else:
             self.request_restart(detached=True, via_service=False)
